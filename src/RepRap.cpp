@@ -565,7 +565,7 @@ OutputBuffer *RepRap::GetStatusResponse(uint8_t type, ResponseSource source)
 	// Coordinates
 	const size_t numAxes = reprap.GetGCodes().GetVisibleAxes();
 	{
-		float liveCoordinates[DRIVES + 1];
+		float liveCoordinates[DRIVES];
 #if SUPPORT_ROLAND
 		if (roland->Active())
 		{
@@ -609,12 +609,14 @@ OutputBuffer *RepRap::GetStatusResponse(uint8_t type, ResponseSource source)
 		}
 
 		// XYZ positions
-		// TODO ideally we would report "unknown" or similar for axis positions that are not known because we haven't homed them, but that requires changes to DWC and PanelDue.
+		// TODO ideally we would report "unknown" or similar for axis positions that are not known because we haven't homed them, but that requires changes to both DWC and PanelDue.
 		response->cat("],\"xyz\":");
 		ch = '[';
 		for (size_t axis = 0; axis < numAxes; axis++)
 		{
-			response->catf("%c%.3f", ch, liveCoordinates[axis]);
+			// Coordinates may be NaNs, for example when delta or SCARA homing fails. Replace any NaNs by 999.9 to prevent JSON parsing errors.
+			const float coord = liveCoordinates[axis];
+			response->catf("%c%.3f", ch, (std::isnan(coord) || std::isinf(coord)) ? 999.9 : coord);
 			ch = ',';
 		}
 	}
@@ -669,8 +671,8 @@ OutputBuffer *RepRap::GetStatusResponse(uint8_t type, ResponseSource source)
 				response->EncodeString(boxMessage, ARRAY_SIZE(boxMessage), false);
 				response->cat(",\"title\":");
 				response->EncodeString(boxTitle, ARRAY_SIZE(boxTitle), false);
-				response->catf(",\"mode\":%d,\"timeout\":%.1f,\"showZ\":%d}",
-						boxMode, timeLeft, boxZControls ? 1 : 0);
+				response->catf(",\"mode\":%d,\"timeout\":%.1f,\"controls\":%u}",
+						boxMode, timeLeft, boxControls);
 			}
 			response->cat("}");
 		}
@@ -1166,6 +1168,11 @@ OutputBuffer *RepRap::GetConfigResponse()
 	{
 		response->catf(" + %s", expansionName);
 	}
+	const char* additionalExpansionName = DuetExpansion::GetAdditionalExpansionBoardName();
+	if (additionalExpansionName != nullptr)
+	{
+		response->catf(" + %s", additionalExpansionName);
+	}
 #endif
 	response->catf("\",\"firmwareName\":\"%s\"", FIRMWARE_NAME);
 	response->catf(",\"firmwareVersion\":\"%s\"", VERSION);
@@ -1407,8 +1414,8 @@ OutputBuffer *RepRap::GetLegacyStatusResponse(uint8_t type, int seq)
 
 	if (displayMessageBox)
 	{
-		response->catf(",\"msgBox.mode\":%d,\"msgBox.timeout\":%.1f,\"msgBox.showZ\":%d",
-				boxMode, timeLeft, boxZControls ? 1 : 0);
+		response->catf(",\"msgBox.mode\":%d,\"msgBox.timeout\":%.1f,\"msgBox.axes\":%u",
+				boxMode, timeLeft, boxControls);
 		response->cat(",\"msgBox.msg\":");
 		response->EncodeString(boxMessage, ARRAY_SIZE(boxMessage), false);
 		response->cat(",\"msgBox.title\":");
@@ -1642,14 +1649,14 @@ void RepRap::SetMessage(const char *msg)
 }
 
 // Display a message box on the web interface
-void RepRap::SetAlert(const char *msg, const char *title, int mode, float timeout, bool showZControls)
+void RepRap::SetAlert(const char *msg, const char *title, int mode, float timeout, AxesBitmap controls)
 {
 	SafeStrncpy(boxMessage, msg, ARRAY_SIZE(boxMessage));
 	SafeStrncpy(boxTitle, title, ARRAY_SIZE(boxTitle));
 	boxMode = mode;
 	boxTimer = (timeout <= 0.0) ? 0 : millis();
 	boxTimeout = round(max<float>(timeout, 0.0) * 1000.0);
-	boxZControls = showZControls;
+	boxControls = controls;
 	displayMessageBox = true;
 }
 
@@ -1763,13 +1770,13 @@ void RepRap::ClearTemperatureFault(int8_t wasDudHeater)
 }
 
 // Get the current axes used as X axes
-uint32_t RepRap::GetCurrentXAxes() const
+AxesBitmap RepRap::GetCurrentXAxes() const
 {
 	return (currentTool == nullptr) ? DefaultXAxisMapping : currentTool->GetXAxisMap();
 }
 
 // Get the current axes used as X axes
-uint32_t RepRap::GetCurrentYAxes() const
+AxesBitmap RepRap::GetCurrentYAxes() const
 {
 	return (currentTool == nullptr) ? DefaultYAxisMapping : currentTool->GetYAxisMap();
 }

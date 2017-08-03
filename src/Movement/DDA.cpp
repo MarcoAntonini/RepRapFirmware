@@ -239,7 +239,6 @@ bool DDA::Init(const GCodes::RawMove &nextMove, bool doMotorMapping)
 	isPrintingMove = false;
 	bool realMove = false, xyzMoving = false;
 	xyMoving = false;
-	const bool isSpecialDeltaMove = (move.IsDeltaMode() && !doMotorMapping);
 	float accelerations[DRIVES];
 	const float * const normalAccelerations = reprap.GetPlatform().Accelerations();
 	const size_t numAxes = reprap.GetGCodes().GetTotalAxes();
@@ -255,7 +254,7 @@ bool DDA::Init(const GCodes::RawMove &nextMove, bool doMotorMapping)
 		const int32_t delta = (drive < numAxes) ? endPoint[drive] - positionNow[drive] : endPoint[drive];
 
 		DriveMovement*& pdm = pddm[drive];
-		if (drive < numAxes && !isSpecialDeltaMove)
+		if (drive < numAxes && doMotorMapping)
 		{
 			const float positionDelta = nextMove.coords[drive] - prev->GetEndCoordinate(drive, false);
 			directionVector[drive] = positionDelta;
@@ -339,8 +338,8 @@ bool DDA::Init(const GCodes::RawMove &nextMove, bool doMotorMapping)
 		accelerations[Z_AXIS] = ZProbeMaxAcceleration;
 	}
 
-	// The end coordinates will be valid at the end of this move if it does not involve endstop checks and is not a special move on a delta printer
-	endCoordinatesValid = (endStopsToCheck == 0) && (doMotorMapping || !move.IsDeltaMode());
+	// The end coordinates will be valid at the end of this move if it does not involve endstop checks and is not a raw motor move
+	endCoordinatesValid = (endStopsToCheck == 0) && doMotorMapping;
 
 	// 4. Normalise the direction vector and compute the amount of motion.
 	if (xyzMoving)
@@ -377,7 +376,7 @@ bool DDA::Init(const GCodes::RawMove &nextMove, bool doMotorMapping)
 	// 6. Set the speed to the smaller of the requested and maximum speed.
 	// Also enforce a minimum speed of 0.5mm/sec. We need a minimum speed to avoid overflow in the movement calculations.
 	float reqSpeed = nextMove.feedRate;
-	if (isSpecialDeltaMove)
+	if (!doMotorMapping)
 	{
 		// Special case of a raw or homing move on a delta printer
 		// We use the Cartesian motion system to implement these moves, so the feed rate will be interpreted in Cartesian coordinates.
@@ -928,10 +927,10 @@ void DDA::SetPositions(const float move[DRIVES], size_t numDrives)
 }
 
 // Get a Cartesian end coordinate from this move
-float DDA::GetEndCoordinate(size_t drive, bool disableDeltaMapping)
+float DDA::GetEndCoordinate(size_t drive, bool disableMotorMapping)
 pre(disableDeltaMapping || drive < MaxAxes)
 {
-	if (disableDeltaMapping)
+	if (disableMotorMapping)
 	{
 		return Move::MotorEndpointToPosition(endPoint[drive], drive);
 	}
@@ -1267,7 +1266,7 @@ void DDA::CheckEndstops(Platform& platform)
 		{
 		case EndStopHit::lowHit:
 			MoveAborted();											// set the state to completed and recalculate the endpoints
-			reprap.GetMove().ZProbeTriggered(this);
+			reprap.GetGCodes().MoveStoppedByZProbe();
 			break;
 
 		case EndStopHit::lowNear:
@@ -1310,36 +1309,30 @@ void DDA::CheckEndstops(Platform& platform)
 	const size_t numAxes = reprap.GetGCodes().GetTotalAxes();
 	for (size_t drive = 0; drive < numAxes; ++drive)
 	{
-		if ((endStopsToCheck & (1 << drive)) != 0)
+		if (IsBitSet(endStopsToCheck, drive))
 		{
-			switch(platform.Stopped(drive))
+			const EndStopHit esh = platform.Stopped(drive);
+			switch (esh)
 			{
 			case EndStopHit::lowHit:
-				endStopsToCheck &= ~(1 << drive);					// clear this check so that we can check for more
-				if (endStopsToCheck == 0 || reprap.GetMove().GetKinematics().DriveIsShared(drive))
-				{
-					// No more endstops to check, or this axis uses shared motors, so stop the entire move
-					MoveAborted();
-				}
-				else
-				{
-					StopDrive(drive);
-				}
-				reprap.GetMove().HitLowStop(drive, this);
-				break;
-
 			case EndStopHit::highHit:
-				endStopsToCheck &= ~(1 << drive);					// clear this check so that we can check for more
-				if (endStopsToCheck == 0 || reprap.GetMove().GetKinematics().DriveIsShared(drive))
 				{
-					// No more endstops to check, or this axis uses shared motors, so stop the entire move
-					MoveAborted();
+					ClearBit(endStopsToCheck, drive);					// clear this check so that we can check for more
+					StopDrive(drive);									// we must stop the drive before we mess with its coordinates
+					bool stopAll = (endStopsToCheck == 0);
+					if (drive < reprap.GetGCodes().GetTotalAxes() && IsHomingAxes())
+					{
+						if (reprap.GetMove().GetKinematics().OnHomingSwitchTriggered(drive, esh == EndStopHit::highHit, reprap.GetPlatform().GetDriveStepsPerUnit(), *this))
+						{
+							stopAll = true;
+						}
+						reprap.GetGCodes().SetAxisIsHomed(drive);
+					}
+					if (stopAll)
+					{
+						MoveAborted();									// no more endstops to check, or this axis uses shared motors, so stop the entire move
+					}
 				}
-				else
-				{
-					StopDrive(drive);
-				}
-				reprap.GetMove().HitHighStop(drive, this);
 				break;
 
 			case EndStopHit::lowNear:
@@ -1575,9 +1568,12 @@ void DDA::StopDrive(size_t drive)
 // It adjusts the end points of the current move to account for how far through the move we got.
 void DDA::MoveAborted()
 {
-	for (size_t drive = 0; drive < DRIVES; ++drive)
+	if (state == executing)
 	{
-		StopDrive(drive);
+		for (size_t drive = 0; drive < DRIVES; ++drive)
+		{
+			StopDrive(drive);
+		}
 	}
 	state = completed;
 }

@@ -39,7 +39,6 @@
 #endif
 
 const char GCodes::axisLetters[MaxAxes] = AXES_('X', 'Y', 'Z', 'U', 'V', 'W', 'A', 'B', 'C');
-const char* const GCodes::HomingFileNames[MaxAxes] = AXES_("homex.g", "homey.g", "homez.g", "homeu.g", "homev.g", "homew.g", "homea.g", "homeb.g", "homec.g");
 
 const size_t gcodeReplyLength = 2048;			// long enough to pass back a reasonable number of files in response to M20
 
@@ -92,6 +91,7 @@ void GCodes::Init()
 	doingToolChange = false;
 	toolChangeParam = DefaultToolChangeParam;
 	active = true;
+	fileSize = 0;
 	longWait = platform.Time();
 	limitAxes = true;
 	SetAllAxesNotHomed();
@@ -180,6 +180,7 @@ void GCodes::Reset()
 #endif
 	doingToolChange = false;
 	doingManualBedProbe = false;
+	pausePending = false;
 	probeIsDeployed = false;
 	moveBuffer.filePos = noFilePosition;
 	lastEndstopStates = platform.GetAllEndstopStates();
@@ -286,6 +287,7 @@ void GCodes::Spin()
 		case GCodeState::waitingForMoveToComplete:
 			if (LockMovementAndWaitForStandstill(gb))		// movement should already be locked, but we need to wait for standstill and fetch the current position
 			{
+				// Check whether we made any G1 S3 moves and need to set the axis limits
 				for (size_t axis = 0; axis < numVisibleAxes; ++axis)
 				{
 					if (IsBitSet<AxesBitmap>(axesToSenseLength, axis))
@@ -307,22 +309,53 @@ void GCodes::Spin()
 			}
 			break;
 
-		case GCodeState::homing:
+		case GCodeState::homing1:
 			if (toBeHomed == 0)
 			{
 				gb.SetState(GCodeState::normal);
 			}
 			else
 			{
-				for (size_t axis = 0; axis < numTotalAxes; ++axis)
+				AxesBitmap mustHomeFirst;
+				const char *nextHomingFile = reprap.GetMove().GetKinematics().GetHomingFileName(toBeHomed, axesHomed, numVisibleAxes, mustHomeFirst);
+				if (nextHomingFile == nullptr)
 				{
-					// Leave the Z axis until all other axes are done
-					if (IsBitSet<AxesBitmap>(toBeHomed, axis) && (axis != Z_AXIS || toBeHomed == MakeBitmap<AxesBitmap>(Z_AXIS)))
+					// Error, can't home this axes
+					reply.copy("Must home these axes:");
+					AppendAxes(reply, mustHomeFirst);
+					reply.cat(" before homing these:");
+					AppendAxes(reply, toBeHomed);
+					error = true;
+					toBeHomed = 0;
+					gb.SetState(GCodeState::normal);
+				}
+				else
+				{
+					gb.SetState(GCodeState::homing2);
+					if (!DoFileMacro(gb, nextHomingFile, false))
 					{
-						ClearBit(toBeHomed, axis);
-						DoFileMacro(gb, HomingFileNames[axis], true);
-						break;
+						reply.printf("Homing file %s not found", nextHomingFile);
+						error = true;
+						gb.SetState(GCodeState::normal);
 					}
+				}
+			}
+			break;
+
+		case GCodeState::homing2:
+			if (LockMovementAndWaitForStandstill(gb))		// movement should already be locked, but we need to wait for the previous homing move to complete
+			{
+				// Test whether the previous homing move homed any axes
+				if ((toBeHomed & axesHomed) == 0)
+				{
+					reply.copy("Homing failed");
+					error = true;
+					gb.SetState(GCodeState::normal);
+				}
+				else
+				{
+					toBeHomed &= ~axesHomed;
+					gb.SetState((toBeHomed == 0) ? GCodeState::normal : GCodeState::homing1);
 				}
 			}
 			break;
@@ -346,7 +379,7 @@ void GCodes::Spin()
 		case GCodeState::toolChange1:		// Release the old tool (if any), then run tpre for the new tool
 		case GCodeState::m109ToolChange1:	// Release the old tool (if any), then run tpre for the new tool
 			{
-				const Tool *oldTool = reprap.GetCurrentTool();
+				const Tool * const oldTool = reprap.GetCurrentTool();
 				if (oldTool != nullptr)
 				{
 					reprap.StandbyTool(oldTool->Number());
@@ -363,12 +396,6 @@ void GCodes::Spin()
 		case GCodeState::toolChange2:		// Select the new tool (even if it doesn't exist - that just deselects all tools) and run tpost
 		case GCodeState::m109ToolChange2:	// Select the new tool (even if it doesn't exist - that just deselects all tools) and run tpost
 			reprap.SelectTool(newToolNumber);
-
-			// The user position reflects the position of the old tool, but on an IDEX machine the new tool is at a different place
-			// Also tool offsets may have changed, but as some axes may not have been homed we should avoid moving those axes when the next movement command is given.
-			// So adjust the current user position to reflect the actual position of the tool.
-			ToolOffsetInverseTransform(moveBuffer.coords, currentUserPosition);
-
 			gb.AdvanceState();
 			if (AllAxesAreHomed())
 			{
@@ -976,8 +1003,8 @@ void GCodes::Spin()
 			// We just did the retraction part of a firmware retraction, now we need to do the Z hop
 			if (segmentsLeft == 0)
 			{
-				const uint32_t xAxes = reprap.GetCurrentXAxes();
-				const uint32_t yAxes = reprap.GetCurrentYAxes();
+				const AxesBitmap xAxes = reprap.GetCurrentXAxes();
+				const AxesBitmap yAxes = reprap.GetCurrentYAxes();
 				reprap.GetMove().GetCurrentUserPosition(moveBuffer.coords, 0, xAxes, yAxes);
 				for (size_t i = numTotalAxes; i < DRIVES; ++i)
 				{
@@ -1090,7 +1117,7 @@ void GCodes::Spin()
 		}
 		if (displayDeltaNotHomedWarning)
 		{
-			platform.Message(GENERIC_MESSAGE, "Attempt to move the head of a delta printer before homing the towers\n");
+			platform.Message(GENERIC_MESSAGE, "Attempt to move the head of a Delta or SCARA printer before homing the towers\n");
 			displayDeltaNotHomedWarning = false;
 			lastWarningMillis = now;
 		}
@@ -1188,6 +1215,7 @@ void GCodes::DoFilePrint(GCodeBuffer& gb, StringRef& reply)
 				fd.Close();
 				UnlockAll(gb);
 				reprap.GetPrintMonitor().StoppedPrint();
+				pausePending = false;
 #ifdef DUET_NG
 				platform.GetMassStorage()->Delete(platform.GetSysDir(), RESUME_AFTER_POWER_FAIL_G, true);
 #endif
@@ -1214,6 +1242,12 @@ void GCodes::DoFilePrint(GCodeBuffer& gb, StringRef& reply)
 			{
 				UnlockAll(gb);
 				HandleReply(gb, false, "");
+				if (pausePending && &gb == fileGCode && !gb.IsDoingFileMacro())
+				{
+					const char* const m226Command = "M226\n";
+					gb.Put(m226Command, strlen(m226Command));
+					pausePending = false;
+				}
 			}
 		}
 	}
@@ -1652,12 +1686,17 @@ bool GCodes::LoadExtrusionAndFeedrateFromGCode(GCodeBuffer& gb, int moveType)
 		}
 
 		const size_t eMoveCount = tool->DriveCount();
-		if (eMoveCount > 0)
+		if (eMoveCount != 0)
 		{
 			// Set the drive values for this tool
-			if (tool->GetMixing())
+			float eMovement[MaxExtruders];
+			size_t mc = eMoveCount;
+			gb.GetFloatArray(eMovement, mc, false);
+
+			if (mc == 1 && eMoveCount > 1)
 			{
-				const float moveArg = gb.GetFValue() * distanceScale;
+				// There are multiple extruders present but only one value has been specified, so use mixing
+				const float moveArg = eMovement[0] * distanceScale;
 				float requestedExtrusionAmount;
 				if (gb.MachineState().drivesRelative)
 				{
@@ -1679,13 +1718,11 @@ bool GCodes::LoadExtrusionAndFeedrateFromGCode(GCodeBuffer& gb, int moveType)
 					rawExtruderTotal += extrusionAmount;
 					moveBuffer.coords[drive + numTotalAxes] = extrusionAmount * extrusionFactors[drive] * volumetricExtrusionFactors[drive];
 				}
+
 			}
 			else
 			{
-				float eMovement[MaxExtruders];
-				size_t mc = eMoveCount;
-				gb.GetFloatArray(eMovement, mc, false);
-
+				// Either there is only one extruder associated with this tool, or individual extrusion amounts have been provided
 				for (size_t eDrive = 0; eDrive < eMoveCount; eDrive++)
 				{
 					const int drive = tool->Drive(eDrive);
@@ -1762,19 +1799,12 @@ bool GCodes::DoStraightMove(GCodeBuffer& gb, StringRef& reply)
 		}
 	}
 
-	// Check for damaging moves on a delta printer
-	if (reprap.GetMove().GetKinematics().GetKinematicsType() == KinematicsType::linearDelta)
+	// Check for damaging moves on a delta or SCARA printer
+	const KinematicsType kinType = reprap.GetMove().GetKinematics().GetKinematicsType();
+	if (moveBuffer.moveType == 0)
 	{
-		// Extra checks to avoid damaging delta printers
-		if (moveBuffer.moveType != 0 && !gb.MachineState().axesRelative)
-		{
-			// We have been asked to do a move without delta mapping on a delta machine, but the move is not relative.
-			// This may be damaging and is almost certainly a user mistake, so ignore the move.
-			reply.copy("Attempt to move the motors of a delta printer to absolute positions");
-			return true;
-		}
-
-		if (moveBuffer.moveType == 0 && !AllAxesAreHomed())
+		// Regular move. If it's a delta or SCARA printer, all axes must be homed first.
+		if (!AllAxesAreHomed() && (kinType == KinematicsType::linearDelta || kinType == KinematicsType::scara))
 		{
 			// The user may be attempting to move a delta printer to an XYZ position before homing the axes
 			// This may be damaging and is almost certainly a user mistake, so ignore the move. But allow extruder-only moves.
@@ -1783,6 +1813,15 @@ bool GCodes::DoStraightMove(GCodeBuffer& gb, StringRef& reply)
 				displayDeltaNotHomedWarning = true;
 				return false;
 			}
+		}
+	}
+	else
+	{
+		// Special move. If on a delta, movement must be relative.
+		if (!gb.MachineState().axesRelative && kinType == KinematicsType::linearDelta)
+		{
+			reply.copy("Attempt to move the motors of a Delta printer to absolute positions");
+			return true;
 		}
 	}
 
@@ -1809,7 +1848,7 @@ bool GCodes::DoStraightMove(GCodeBuffer& gb, StringRef& reply)
 	}
 #endif
 
-	if (moveBuffer.moveType != 0)
+	if (reprap.GetMove().IsRawMotorMove(moveBuffer.moveType))
 	{
 		// This is a raw motor move, so we need the current raw motor positions in moveBuffer.coords
 		reprap.GetMove().GetCurrentUserPosition(moveBuffer.coords, moveBuffer.moveType, reprap.GetCurrentXAxes(), reprap.GetCurrentYAxes());
@@ -2178,15 +2217,16 @@ bool GCodes::SetPositions(GCodeBuffer& gb)
 			const size_t eMoveCount = tool->DriveCount();
 			if (eMoveCount != 0)
 			{
-				if (tool->GetMixing())
+				float eMovement[MaxExtruders];
+				size_t mc = eMoveCount;
+				gb.GetFloatArray(eMovement, mc, false);
+				if (mc == 1 && eMoveCount > 1)
 				{
+					// The tool has multiple extruders, but only one position was given. Treat it as the mix position.
 					tool->virtualExtruderPosition = gb.GetFValue() * distanceScale;
 				}
 				else
 				{
-					float eMovement[MaxExtruders];
-					size_t mc = eMoveCount;
-					gb.GetFloatArray(eMovement, mc, false);
 					for (size_t eDrive = 0; eDrive < eMoveCount; eDrive++)
 					{
 						lastRawExtruderPosition[tool->Drive(eDrive)] = eMovement[eDrive] * distanceScale;
@@ -2266,44 +2306,24 @@ bool GCodes::DoHome(GCodeBuffer& gb, StringRef& reply, bool& error)
 	}
 #endif
 
-	if (reprap.GetMove().GetKinematics().GetKinematicsType() == KinematicsType::linearDelta)
+	// Find out which axes we have been asked to home
+	toBeHomed = 0;
+	for (size_t axis = 0; axis < numTotalAxes; ++axis)
 	{
-		// Homing on a delta printer uses homedelta.g instead of homeall.g and we can only home all towers at once
-		SetAllAxesNotHomed();
-		DoFileMacro(gb, HOME_DELTA_G, true);
-	}
-	else
-	{
-		toBeHomed = 0;
-		for (size_t axis = 0; axis < numTotalAxes; ++axis)
+		if (gb.Seen(axisLetters[axis]))
 		{
-			if (gb.Seen(axisLetters[axis]))
-			{
-				SetBit(toBeHomed, axis);
-				SetAxisNotHomed(axis);
-			}
+			SetBit(toBeHomed, axis);
+			SetAxisNotHomed(axis);
 		}
+	}
 
-		if (toBeHomed == 0 || toBeHomed == LowestNBits<AxesBitmap>(numTotalAxes))
-		{
-			// Homing everything
-			SetAllAxesNotHomed();
-			DoFileMacro(gb, HOME_ALL_G, true);
-		}
-		else if (   platform.MustHomeXYBeforeZ()
-				 && IsBitSet(toBeHomed, Z_AXIS)
-				 && (!IsBitSet(toBeHomed | axesHomed, X_AXIS) || !IsBitSet(toBeHomed | axesHomed, Y_AXIS))
-				)
-		{
-			// We can only home Z if both X and Y have already been homed or are being homed
-			reply.copy("Must home all other axes before homing Z");
-			error = true;
-		}
-		else
-		{
-			gb.SetState(GCodeState::homing);
-		}
+	if (toBeHomed == 0)
+	{
+		SetAllAxesNotHomed();		// homing everything
+		toBeHomed = LowestNBits<AxesBitmap>(numVisibleAxes);
 	}
+
+	gb.SetState(GCodeState::homing1);
 	return true;
 }
 
@@ -2683,10 +2703,11 @@ void GCodes::GetCurrentCoordinates(StringRef& s) const
 	}
 }
 
-bool GCodes::OpenFileToWrite(GCodeBuffer& gb, const char* directory, const char* fileName)
+bool GCodes::OpenFileToWrite(GCodeBuffer& gb, const char* directory, const char* fileName, const FilePosition size, const bool binaryWrite, const uint32_t fileCRC32)
 {
 	fileBeingWritten = platform.GetFileStore(directory, fileName, true);
 	eofStringCounter = 0;
+	fileSize = size;
 	if (fileBeingWritten == nullptr)
 	{
 		platform.MessageF(GENERIC_MESSAGE, "Can't open GCode file \"%s\" for writing.\n", fileName);
@@ -2694,6 +2715,8 @@ bool GCodes::OpenFileToWrite(GCodeBuffer& gb, const char* directory, const char*
 	}
 	else
 	{
+		gb.SetCRC32(fileCRC32);
+		gb.SetBinaryWriting(binaryWrite);
 		gb.SetWritingFileDirectory(directory);
 		return true;
 	}
@@ -2707,17 +2730,12 @@ void GCodes::WriteHTMLToFile(GCodeBuffer& gb, char b)
 		return;
 	}
 
-	if (b == eofString[eofStringCounter])
+	if ((b == eofString[eofStringCounter]) && (fileSize == 0))
 	{
 		eofStringCounter++;
 		if (eofStringCounter >= eofStringLength)
 		{
-			fileBeingWritten->Close();
-			fileBeingWritten = nullptr;
-			gb.SetWritingFileDirectory(nullptr);
-			const char* r = (platform.Emulating() == marlin) ? "Done saving file." : "";
-			HandleReply(gb, false, r);
-			return;
+			FinishWrite(gb);
 		}
 	}
 	else
@@ -2731,7 +2749,30 @@ void GCodes::WriteHTMLToFile(GCodeBuffer& gb, char b)
 			eofStringCounter = 0;
 		}
 		fileBeingWritten->Write(b);		// writing one character at a time isn't very efficient, but uploading HTML files via USB is rarely done these days
+		if (fileSize > 0 && fileBeingWritten->Length() >= fileSize)
+		{
+			FinishWrite(gb);
+		}
 	}
+}
+
+void GCodes::FinishWrite(GCodeBuffer& gb)
+{
+	const char* r;
+	fileBeingWritten->Close();
+	if ((gb.GetCRC32() != fileBeingWritten->GetCRC32()) && (gb.GetCRC32() != 0))
+	{
+		r = "Error: CRC32 checksum doesn't match";
+	}
+	else
+	{
+		r = (platform.Emulating() == marlin) ? "Done saving file." : "";
+	}
+	fileBeingWritten = nullptr;
+	gb.SetBinaryWriting(false);
+	gb.SetWritingFileDirectory(nullptr);
+
+	HandleReply(gb, false, r);
 }
 
 void GCodes::WriteGCodeToFile(GCodeBuffer& gb)
@@ -3105,11 +3146,12 @@ bool GCodes::ManageTool(GCodeBuffer& gb, StringRef& reply)
 		}
 		else
 		{
-			Tool* const tool = Tool::Create(toolNumber, name, drives, dCount, heaters, hCount, xMap, yMap, fanMap);
-			if (tool != nullptr)
+			Tool* const tool = Tool::Create(toolNumber, name, drives, dCount, heaters, hCount, xMap, yMap, fanMap, reply);
+			if (tool == nullptr)
 			{
-				reprap.AddTool(tool);
+				return true;
 			}
+			reprap.AddTool(tool);
 		}
 	}
 	else
@@ -4176,6 +4218,18 @@ void GCodes::UnlockAll(const GCodeBuffer& gb)
 		{
 			resourceOwners[i] = nullptr;
 			ClearBit(gb.MachineState().lockedResources, i);
+		}
+	}
+}
+
+// Append a list of axes to a string
+void GCodes::AppendAxes(StringRef& reply, AxesBitmap axes) const
+{
+	for (size_t axis = 0; axis < numVisibleAxes; ++axis)
+	{
+		if (IsBitSet(axes, axis))
+		{
+			reply.cat(axisLetters[axis]);
 		}
 	}
 }

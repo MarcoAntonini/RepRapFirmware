@@ -48,7 +48,8 @@ const size_t NUM_SERIAL_CHANNELS = 2;			// The number of serial IO channels (USB
 #define SERIAL_MAIN_DEVICE SerialUSB
 #define SERIAL_AUX_DEVICE Serial
 
-const Pin ExpansionStart = 200;					// Pin numbers at/above this are on the I/O expander
+const Pin DueXnExpansionStart = 200;			// Pin numbers 200-215 are on the I/O expander
+const Pin AdditionalIoExpansionStart = 220;		// Pin numbers 220-235 are on the additional I/O expander
 
 // The numbers of entries in each array must correspond with the values of DRIVES, AXES, or HEATERS. Set values to NoPin to flag unavailability.
 
@@ -153,8 +154,9 @@ const Pin SpecialPinMap[] =
 {
 	24, 97, 98, 99														// We allow CS5-CS8 to be used because few users need >4 thermocouples or RTDs
 };
-const Pin DueX5GpioPinMap[] = { 211, 210, 209, 208 };					// GPIO 1-4 on DueX5
-const int HighestLogicalPin = 100 + ARRAY_SIZE(DueX5GpioPinMap) - 1;	// highest logical pin number on this electronics
+const Pin DueX5GpioPinMap[] = { 211, 210, 209, 208 };					// Pins 100-103 map to GPIO 1-4 on DueX5
+// We also allow pins 120-135 to be used if there is an additional SX1509B expander
+const int HighestLogicalPin = 135;										// highest logical pin number on this electronics
 
 // SAM4E Flash locations (may be expanded in the future)
 const uint32_t IAP_FLASH_START = 0x00470000;

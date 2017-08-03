@@ -518,13 +518,20 @@ bool GCodes::HandleMcode(GCodeBuffer& gb, StringRef& reply)
 		break;
 
 	case 226: // Gcode Initiated Pause
-		if (&gb == fileGCode)			// ignore M226 if it did't come from within a file being printed
+		if (&gb == fileGCode)						// ignore M226 if it did't come from within a file being printed
 		{
-			if (!LockMovement(gb))					// lock movement before calling DoPause
+			if (gb.IsDoingFileMacro())
 			{
-				return false;
+				pausePending = true;
 			}
-			DoPause(gb, false);
+			else
+			{
+				if (!LockMovement(gb))					// lock movement before calling DoPause
+				{
+					return false;
+				}
+				DoPause(gb, false);
+			}
 		}
 		break;
 
@@ -538,6 +545,10 @@ bool GCodes::HandleMcode(GCodeBuffer& gb, StringRef& reply)
 		{
 			reply.copy("Cannot pause print, because no file is being printed!");
 			error = true;
+		}
+		else if (fileGCode->IsDoingFileMacro())
+		{
+			pausePending = true;
 		}
 		else
 		{
@@ -576,7 +587,7 @@ bool GCodes::HandleMcode(GCodeBuffer& gb, StringRef& reply)
 			const char* str = gb.GetUnprecedentedString();
 			if (str != nullptr)
 			{
-				bool ok = OpenFileToWrite(gb, platform.GetGCodeDir(), str);
+				bool ok = OpenFileToWrite(gb, platform.GetGCodeDir(), str, 0, false, 0);
 				if (ok)
 				{
 					reply.printf("Writing to file: %s", str);
@@ -752,7 +763,7 @@ bool GCodes::HandleMcode(GCodeBuffer& gb, StringRef& reply)
 		break;
 
 	case 83:	// Use relative extruder positioning
-		if (!gb.MachineState().drivesRelative)	// don't reset the absolute extruder position if it was already relative
+		if (!gb.MachineState().drivesRelative)		// don't reset the absolute extruder position if it was already relative
 		{
 			for (size_t extruder = 0; extruder < MaxExtruders; extruder++)
 			{
@@ -1018,10 +1029,15 @@ bool GCodes::HandleMcode(GCodeBuffer& gb, StringRef& reply)
 		{
 			reply.printf("FIRMWARE_NAME: %s FIRMWARE_VERSION: %s ELECTRONICS: %s", FIRMWARE_NAME, VERSION, platform.GetElectronicsString());
 #ifdef DUET_NG
-			const char* expansionName = DuetExpansion::GetExpansionBoardName();
+			const char* const expansionName = DuetExpansion::GetExpansionBoardName();
 			if (expansionName != nullptr)
 			{
 				reply.catf(" + %s", expansionName);
+			}
+			const char* const additionalExpansionName = DuetExpansion::GetAdditionalExpansionBoardName();
+			if (additionalExpansionName != nullptr)
+			{
+				reply.catf(" + %s", additionalExpansionName);
 			}
 #endif
 			reply.catf(" FIRMWARE_DATE: %s", DATE);
@@ -1738,8 +1754,14 @@ bool GCodes::HandleMcode(GCodeBuffer& gb, StringRef& reply)
 					tParam = 0.0;
 				}
 
-				int32_t zParam = 0;
-				gb.TryGetIValue('Z', zParam, seen);
+				AxesBitmap axisControls = 0;
+				for (size_t axis = 0; axis < numTotalAxes; axis++)
+				{
+					if (gb.Seen(axisLetters[axis]) && gb.GetIValue() > 0)
+					{
+						SetBit(axisControls, axis);
+					}
+				}
 
 				const MessageType mt = GetMessageBoxDevice(gb);						// get the display device
 
@@ -1750,7 +1772,7 @@ bool GCodes::HandleMcode(GCodeBuffer& gb, StringRef& reply)
 					gb.MachineState().waitingForAcknowledgement = true;				// flag that we are waiting for acknowledgement
 				}
 
-				platform.SendAlert(mt, messageBuffer, titleBuffer, (int)sParam, tParam, zParam == 1);
+				platform.SendAlert(mt, messageBuffer, titleBuffer, (int)sParam, tParam, axisControls);
 			}
 		}
 		break;
@@ -2374,37 +2396,31 @@ bool GCodes::HandleMcode(GCodeBuffer& gb, StringRef& reply)
 		}
 		break;
 
-	case 559: // Upload config.g or another gcode file to put in the sys directory
+	case 559:
+	case 560: // Binary writing
+	{
+		const char* folder = platform.GetSysDir();
+		const char* defaultFile = platform.GetConfigFile();
+		if (code == 560)
 		{
-			const char* str = (gb.Seen('P') ? gb.GetString() : platform.GetConfigFile());
-			const bool ok = OpenFileToWrite(gb, platform.GetSysDir(), str);
-			if (ok)
-			{
-				reply.printf("Writing to file: %s", str);
-			}
-			else
-			{
-				reply.printf("Can't open file %s for writing.", str);
-				error = true;
-			}
+			folder = platform.GetWebDir();
+			defaultFile = INDEX_PAGE_FILE;
 		}
-		break;
-
-	case 560: // Upload reprap.htm or another web interface file
+		const char* filename = (gb.Seen('P') ? gb.GetString() : defaultFile);
+		const FilePosition size = (gb.Seen('S') ? (FilePosition)gb.GetIValue() : 0);
+		const uint32_t crc32 = (gb.Seen('C') ? gb.GetUIValue() : 0);
+		const bool ok = OpenFileToWrite(gb, folder, filename, size, true, crc32);
+		if (ok)
 		{
-			const char* str = (gb.Seen('P') ? gb.GetString() : INDEX_PAGE_FILE);
-			const bool ok = OpenFileToWrite(gb, platform.GetWebDir(), str);
-			if (ok)
-			{
-				reply.printf("Writing to file: %s", str);
-			}
-			else
-			{
-				reply.printf("Can't open file %s for writing.", str);
-				error = true;
-			}
+			reply.printf("Writing to file: %s", filename);
 		}
-		break;
+		else
+		{
+			reply.printf("Can't open file %s for writing.", filename);
+			error = true;
+		}
+	}
+	break;
 
 	case 561: // Set identity transform (also clears bed probe grid)
 		reprap.GetMove().SetIdentityTransform();
@@ -2485,7 +2501,7 @@ bool GCodes::HandleMcode(GCodeBuffer& gb, StringRef& reply)
 	case 567: // Set/report tool mix ratios
 		if (gb.Seen('P'))
 		{
-			int8_t tNumber = gb.GetIValue();
+			const int8_t tNumber = gb.GetIValue();
 			Tool* const tool = reprap.GetTool(tNumber);
 			if (tool != nullptr)
 			{
@@ -2518,21 +2534,7 @@ bool GCodes::HandleMcode(GCodeBuffer& gb, StringRef& reply)
 		break;
 
 	case 568: // Turn on/off automatic tool mixing
-		if (gb.Seen('P'))
-		{
-			Tool* const tool = reprap.GetTool(gb.GetIValue());
-			if (tool != nullptr)
-			{
-				if (gb.Seen('S'))
-				{
-					tool->SetMixing(gb.GetIValue() != 0);
-				}
-				else
-				{
-					reply.printf("Tool %d mixing is %s", tool->Number(), (tool->GetMixing()) ? "enabled" : "disabled");
-				}
-			}
-		}
+		reply.copy("The M568 command is no longer needed");
 		break;
 
 	case 569: // Set/report axis direction
@@ -3329,7 +3331,12 @@ bool GCodes::HandleMcode(GCodeBuffer& gb, StringRef& reply)
 				FilamentSensor *sensor = platform.GetFilamentSensor(extruder);
 				if (sensor != nullptr)
 				{
+					// Configure the sensor
 					error = sensor->Configure(gb, reply, seen);
+					if (error)
+					{
+						platform.SetFilamentSensorType(extruder, 0);		// delete the sensor
+					}
 				}
 				else if (!seen)
 				{
