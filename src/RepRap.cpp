@@ -45,6 +45,10 @@ extern "C" void hsmciIdle()
 	}
 #endif
 
+	if (reprap.GetSpinningModule() != moduleFilamentSensors)
+	{
+		FilamentSensor::Spin(false);
+	}
 }
 
 // RepRap member functions.
@@ -217,6 +221,10 @@ void RepRap::Spin()
 	DuetExpansion::Spin(true);
 #endif
 
+	spinningModule = moduleFilamentSensors;
+	ticksInSpinState = 0;
+	FilamentSensor::Spin(true);
+
 	spinningModule = noModule;
 	ticksInSpinState = 0;
 
@@ -264,6 +272,7 @@ void RepRap::Diagnostics(MessageType mtype)
 	heat->Diagnostics(mtype);
 	gCodes->Diagnostics(mtype);
 	network->Diagnostics(mtype);
+	FilamentSensor::Diagnostics(mtype);
 }
 
 // Turn off the heaters, disable the motors, and deactivate the Heat and Move classes. Leave everything else working.
@@ -288,10 +297,10 @@ void RepRap::EmergencyStop()
 	}
 
 	// We do this twice, to avoid an interrupt switching a drive back on. move->Exit() should prevent interrupts doing this.
-	for(int i = 0; i < 2; i++)
+	for (int i = 0; i < 2; i++)
 	{
 		move->Exit();
-		for(size_t drive = 0; drive < DRIVES; drive++)
+		for (size_t drive = 0; drive < DRIVES; drive++)
 		{
 			platform->SetMotorCurrent(drive, 0.0, false);
 			platform->DisableDrive(drive);
@@ -372,7 +381,7 @@ void RepRap::DeleteTool(Tool* tool)
 	// Deselect it if necessary
 	if (GetCurrentTool() == tool)
 	{
-		SelectTool(-1);
+		SelectTool(-1, false);
 	}
 
 	// Switch off any associated heater and remove heater references
@@ -403,7 +412,7 @@ void RepRap::DeleteTool(Tool* tool)
 	platform->UpdateConfiguredHeaters();
 }
 
-void RepRap::SelectTool(int toolNumber)
+void RepRap::SelectTool(int toolNumber, bool simulating)
 {
 	Tool* tool = toolList;
 
@@ -411,7 +420,10 @@ void RepRap::SelectTool(int toolNumber)
 	{
 		if (tool->Number() == toolNumber)
 		{
-			tool->Activate(currentTool);
+			if (!simulating)
+			{
+				tool->Activate(currentTool);
+			}
 			currentTool = tool;
 			return;
 		}
@@ -419,7 +431,7 @@ void RepRap::SelectTool(int toolNumber)
 	}
 
 	// Selecting a non-existent tool is valid.  It sets them all to standby.
-	if (currentTool != nullptr)
+	if (currentTool != nullptr && !simulating)
 	{
 		StandbyTool(currentTool->Number());
 	}
@@ -1330,18 +1342,8 @@ OutputBuffer *RepRap::GetLegacyStatusResponse(uint8_t type, int seq)
 		ch = ',';
 	}
 
-	// Send extruder total extrusion since power up, last G92 or last M23
-	response->cat("],\"extr\":");		// announce the extruder positions
-	ch = '[';
-	for (size_t drive = 0; drive < reprap.GetExtrudersInUse(); drive++)		// loop through extruders
-	{
-		response->catf("%c%.1f", ch, gCodes->GetRawExtruderPosition(drive));
-		ch = ',';
-	}
-	response->cat((ch == '[') ? "[]" : "]");
-
 	// Send the speed and extruder override factors
-	response->catf(",\"sfactor\":%.2f,\"efactor\":", gCodes->GetSpeedFactor() * 100.0);
+	response->catf("],\"sfactor\":%.2f,\"efactor\":", gCodes->GetSpeedFactor() * 100.0);
 	ch = '[';
 	for (size_t i = 0; i < reprap.GetExtrudersInUse(); ++i)
 	{
@@ -1414,7 +1416,7 @@ OutputBuffer *RepRap::GetLegacyStatusResponse(uint8_t type, int seq)
 
 	if (displayMessageBox)
 	{
-		response->catf(",\"msgBox.mode\":%d,\"msgBox.timeout\":%.1f,\"msgBox.axes\":%u",
+		response->catf(",\"msgBox.mode\":%d,\"msgBox.timeout\":%.1f,\"msgBox.controls\":%u",
 				boxMode, timeLeft, boxControls);
 		response->cat(",\"msgBox.msg\":");
 		response->EncodeString(boxMessage, ARRAY_SIZE(boxMessage), false);
@@ -1460,22 +1462,6 @@ OutputBuffer *RepRap::GetLegacyStatusResponse(uint8_t type, int seq)
 
 	response->cat("}");
 	return response;
-}
-
-// Copy some parameter text, stopping at the first control character or when the destination buffer is full, and removing trailing spaces
-void RepRap::CopyParameterText(const char* src, char *dst, size_t length)
-{
-	size_t i;
-	for (i = 0; i + 1 < length && src[i] >= ' '; ++i)
-	{
-		dst[i] = src[i];
-	}
-	// Remove any trailing spaces
-	while (i > 0 && dst[i - 1] == ' ')
-	{
-		--i;
-	}
-	dst[i] = 0;
 }
 
 // Get the list of files in the specified directory in JSON format.
@@ -1694,7 +1680,7 @@ bool RepRap::CheckPassword(const char *pw) const
 void RepRap::SetPassword(const char* pw)
 {
 	// Users sometimes put a tab character between the password and the comment, so allow for this
-	CopyParameterText(pw, password, ARRAY_SIZE(password));
+	SafeStrncpy(password, pw, ARRAY_SIZE(password));
 }
 
 const char *RepRap::GetName() const
@@ -1705,7 +1691,7 @@ const char *RepRap::GetName() const
 void RepRap::SetName(const char* nm)
 {
 	// Users sometimes put a tab character between the machine name and the comment, so allow for this
-	CopyParameterText(nm, myName, ARRAY_SIZE(myName));
+	SafeStrncpy(myName, nm, ARRAY_SIZE(myName));
 
 	// Set new DHCP hostname
 	network->SetHostname(myName);

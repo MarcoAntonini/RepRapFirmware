@@ -28,6 +28,7 @@ Licence: GPL
 #include "Platform.h"		// for type EndStopHit
 #include "GCodeInput.h"
 #include "Tools/Filament.h"
+#include "FilamentSensors/FilamentSensor.h"
 #include "RestorePoint.h"
 
 const char feedrateLetter = 'F';						// GCode feedrate
@@ -78,7 +79,7 @@ public:
 		float coords[DRIVES];											// new positions for the axes, amount of movement for the extruders
 		float initialCoords[MaxAxes];									// the initial positions of the axes
 		float feedRate;													// feed rate of this move
-		float virtualExtruderPosition;									// the virtual extruder position of the current tool at the start of this move
+		float virtualExtruderPosition;									// the virtual extruder position at the start of this move
 		FilePosition filePos;											// offset in the file being printed at the start of reading this move
 		AxesBitmap xAxes;												// axes that X is mapped to
 		AxesBitmap yAxes;												// axes that Y is mapped to
@@ -102,6 +103,7 @@ public:
 	bool ReadMove(RawMove& m);											// Called by the Move class to get a movement set by the last G Code
 	void ClearMove();
 	void QueueFileToPrint(const char* fileName);						// Open a file of G Codes to run
+	void StartPrinting();												// Start printing the file already selected
 	void DeleteFile(const char* fileName);								// Does what it says
 	void GetCurrentCoordinates(StringRef& s) const;						// Write where we are into a string
 	bool DoingFileMacro() const;										// Or still busy processing a macro file?
@@ -120,7 +122,6 @@ public:
 
 	float GetSpeedFactor() const { return speedFactor * MinutesToSeconds; }	// Return the current speed factor
 	float GetExtrusionFactor(size_t extruder) { return extrusionFactors[extruder]; } // Return the current extrusion factors
-	float GetRawExtruderPosition(size_t drive) const;					// Get the actual extruder position, after adjusting the extrusion factor
 	float GetRawExtruderTotalByDrive(size_t extruder) const;			// Get the total extrusion since start of print, for one drive
 	float GetTotalRawExtrusion() const { return rawExtruderTotal; }		// Get the total extrusion since start of print, all drives
 	float GetBabyStepOffset() const { return currentBabyStepZOffset; }	// Get the current baby stepping Z offset
@@ -141,13 +142,15 @@ public:
 
 	bool AllAxesAreHomed() const;										// Return true if all axes are homed
 
-	void CancelPrint();													// Cancel the current print
+	void CancelPrint(bool printStats, bool deleteResumeFile);			// Cancel the current print
 
 	void MoveStoppedByZProbe() { zProbeTriggered = true; }				// Called from the step ISR when the Z probe is triggered, causing the move to be aborted
 
 	size_t GetTotalAxes() const { return numTotalAxes; }
 	size_t GetVisibleAxes() const { return numVisibleAxes; }
 	size_t GetNumExtruders() const { return numExtruders; }
+
+	void FilamentError(size_t extruder, FilamentSensorStatus fstat);
 
 #ifdef DUET_NG
 	bool AutoPause();
@@ -193,7 +196,7 @@ private:
 	bool HandleMcode(GCodeBuffer& gb, StringRef& reply);				// Do an M code
 	bool HandleTcode(GCodeBuffer& gb, StringRef& reply);				// Do a T code
 
-	bool DoStraightMove(GCodeBuffer& gb, StringRef& reply);				// Execute a straight move returning true if an error was written to 'reply'
+	bool DoStraightMove(GCodeBuffer& gb, StringRef& reply, bool isCoordinated);	// Execute a straight move returning true if an error was written to 'reply'
 	bool DoArcMove(GCodeBuffer& gb, bool clockwise)						// Execute an arc move returning true if it was badly-formed
 		pre(segmentsLeft == 0; resourceOwners[MoveResource] == &gb);
 
@@ -207,7 +210,6 @@ private:
 
 	bool SetPositions(GCodeBuffer& gb);									// Deal with a G92
 	bool LoadExtrusionAndFeedrateFromGCode(GCodeBuffer& gb, int moveType); // Set up the extrusion and feed rate of a move for the Move class
-	float GetVirtualExtruderPosition() const;							// Get the virtual extruder position of the current tool
 
 	bool Push(GCodeBuffer& gb);											// Push feedrate etc on the stack
 	void Pop(GCodeBuffer& gb);											// Pop feedrate etc
@@ -223,19 +225,19 @@ private:
 	void SetPidParameters(GCodeBuffer& gb, int heater, StringRef& reply); // Set the P/I/D parameters for a heater
 	bool SetHeaterParameters(GCodeBuffer& gb, StringRef& reply);		// Set the thermistor and ADC parameters for a heater, returning true if an error occurs
 	bool ManageTool(GCodeBuffer& gb, StringRef& reply);					// Create a new tool definition, returning true if an error was reported
-	void SetToolHeaters(Tool *tool, float temperature);					// Set all a tool's heaters to the temperature.  For M104...
+	void SetToolHeaters(Tool *tool, float temperature);					// Set all a tool's heaters to the temperature, for M104
 	bool ToolHeatersAtSetTemperatures(const Tool *tool, bool waitWhenCooling) const; // Wait for the heaters associated with the specified tool to reach their set temperatures
 	void GenerateTemperatureReport(StringRef& reply) const;				// Store a standard-format temperature report in reply
 	OutputBuffer *GenerateJsonStatusResponse(int type, int seq, ResponseSource source) const;	// Generate a M408 response
 	void CheckReportDue(GCodeBuffer& gb, StringRef& reply) const;		// Check whether we need to report temperatures or status
 
 	void SavePosition(RestorePoint& rp, const GCodeBuffer& gb) const;	// Save position to a restore point
-	void RestorePosition(const RestorePoint& rp, GCodeBuffer& gb);		// Restore user position form a restore point
+	void RestorePosition(const RestorePoint& rp, GCodeBuffer *gb);		// Restore user position form a restore point
 
 	void SetAllAxesNotHomed();											// Flag all axes as not homed
 	void SetMachinePosition(const float positionNow[DRIVES], bool doBedCompensation = true); // Set the current position to be this
 	void GetCurrentUserPosition();										// Get the current position form the Move class
-	void ToolOffsetTransform(const float coordsIn[MaxAxes], float coordsOut[MaxAxes]);	// Convert user coordinates to head reference point coordinates
+	void ToolOffsetTransform(const float coordsIn[MaxAxes], float coordsOut[MaxAxes], AxesBitmap explicitAxes = 0);	// Convert user coordinates to head reference point coordinates
 	void ToolOffsetInverseTransform(const float coordsIn[MaxAxes], float coordsOut[MaxAxes]);	// Convert head reference point coordinates to user coordinates
 	const char *TranslateEndStopResult(EndStopHit es);					// Translate end stop result to text
 	bool RetractFilament(GCodeBuffer& gb, bool retract);				// Retract or un-retract filaments
@@ -266,6 +268,8 @@ private:
 	void DoManualProbe(GCodeBuffer& gb);								// Do a manual bed probe
 
 	void AppendAxes(StringRef& reply, AxesBitmap axes) const;			// Append a list of axes to a string
+
+	void EndSimulation(GCodeBuffer *gb);								// Restore positions etc. when exiting simulation mode
 
 #ifdef DUET_NG
 	void SaveResumeInfo();
@@ -327,8 +331,8 @@ private:
 	size_t numExtruders;						// How many extruders we have, or may have
 	float axisOffsets[MaxAxes];					// M206 axis offsets
 	float axisScaleFactors[MaxAxes];			// Scale XYZ coordinates by this factor (for Delta configurations)
-	float lastRawExtruderPosition[MaxExtruders]; // Extruder position of the last move fed into the Move class
-	float rawExtruderTotalByDrive[MaxExtruders]; // Total extrusion amount fed to Move class since starting print, before applying extrusion factor, per drive
+	float virtualExtruderPosition;				// Virtual extruder position of the last move fed into the Move class
+	float rawExtruderTotalByDrive[MaxExtruders]; // Extrusion amount in the last G1 command with an E parameter when in absolute extrusion mode
 	float rawExtruderTotal;						// Total extrusion amount fed to Move class since starting print, before applying extrusion factor, summed over all drives
 	float record[DRIVES];						// Temporary store for move positions
 	float distanceScale;						// MM or inches
@@ -372,6 +376,7 @@ private:
 
 	float simulationTime;						// Accumulated simulation time
 	uint8_t simulationMode;						// 0 = not simulating, 1 = simulating, >1 are simulation modes for debugging
+	bool exitSimulationWhenFileComplete;		// true if simulating a file
 
 	// Firmware retraction settings
 	float retractLength, retractExtra;			// retraction length and extra length to un-retract
@@ -398,6 +403,10 @@ private:
 	SHA1Context hash;
 	bool StartHash(const char* filename);
 	bool AdvanceHash(StringRef &reply);
+
+	// Filament monitoring
+	FilamentSensorStatus lastFilamentError;
+	size_t lastFilamentErrorExtruder;
 
 	// Misc
 	float longWait;								// Timer for things that happen occasionally (seconds)

@@ -203,6 +203,13 @@ bool LinearDeltaKinematics::LimitPosition(float coords[], size_t numVisibleAxes,
 			}
 		}
 	}
+
+	// Limit any additional axes according to the M208 limits
+	if (LimitPositionFromAxis(coords, Z_AXIS + 1, numVisibleAxes, axesHomed))
+	{
+		limited = true;
+	}
+
 	return limited;
 }
 
@@ -695,23 +702,28 @@ uint32_t LinearDeltaKinematics::AxesAssumedHomed(AxesBitmap g92Axes) const
 // This function is called when a request is made to home the axes in 'toBeHomed' and the axes in 'alreadyHomed' have already been homed.
 // If we can proceed with homing some axes, return the name of the homing file to be called.
 // If we can't proceed because other axes need to be homed first, return nullptr and pass those axes back in 'mustBeHomedFirst'.
-const char* LinearDeltaKinematics::GetHomingFileName(AxesBitmap toBeHomed, AxesBitmap& alreadyHomed, size_t numVisibleAxes, AxesBitmap& mustHomeFirst) const
+const char* LinearDeltaKinematics::GetHomingFileName(AxesBitmap toBeHomed, AxesBitmap alreadyHomed, size_t numVisibleAxes, AxesBitmap& mustHomeFirst) const
 {
 	alreadyHomed = 0;			// if we home one axis, we need to home them all
 	return "homedelta.g";
 }
 
 // This function is called from the step ISR when an endstop switch is triggered during homing.
-// Take the action needed to define the current position, normally by calling dda.SetDriveCoordinate() or dda.SetPositions().
-// Return true if the entire move should be stopped, false if only the motor concerned should be stopped.
-bool LinearDeltaKinematics::OnHomingSwitchTriggered(size_t axis, bool highEnd, const float stepsPerMm[], DDA& dda) const
+// Return true if the entire homing move should be terminated, false if only the motor associated with the endstop switch should be stopped.
+bool LinearDeltaKinematics::QueryTerminateHomingMove(size_t axis) const
+{
+	return false;
+}
+
+// This function is called from the step ISR when an endstop switch is triggered during homing after stopping just one motor or all motors.
+// Take the action needed to define the current position, normally by calling dda.SetDriveCoordinate() and return false.
+void LinearDeltaKinematics::OnHomingSwitchTriggered(size_t axis, bool highEnd, const float stepsPerMm[], DDA& dda) const
 {
 	if (highEnd)
 	{
 		const float hitPoint = GetHomedCarriageHeight(axis);
 		dda.SetDriveCoordinate(hitPoint * stepsPerMm[axis], axis);
 	}
-	return false;
 }
 
 // End

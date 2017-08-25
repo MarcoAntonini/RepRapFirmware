@@ -47,7 +47,7 @@ public:
 	void SetPrevious(DDA *p) { prev = p; }
 	void Complete() { state = completed; }
 	bool Free();
-	void Prepare();													// Calculate all the values and freeze this DDA
+	void Prepare(uint8_t simMode);									// Calculate all the values and freeze this DDA
 	float CalcTime() const;											// Calculate the time needed for this move (used for simulation)
 	bool HasStepError() const;
 	bool CanPauseAfter() const { return canPauseAfter; }
@@ -71,6 +71,8 @@ public:
 	bool IsHomingAxes() const { return (endStopsToCheck & HomeAxes) != 0; }
 	uint32_t GetXAxes() const { return xAxes; }
 	uint32_t GetYAxes() const { return yAxes; }
+
+	int32_t GetStepsTaken(size_t drive) const;
 
 #if SUPPORT_IOBITS
 	uint32_t GetMoveStartTime() const { return moveStartTime; }
