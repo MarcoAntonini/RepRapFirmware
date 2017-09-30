@@ -171,7 +171,7 @@ template<typename BitmapType> BitmapType LongArrayToBitMap(const long *arr, size
 	for (size_t i = 0; i < numEntries; ++i)
 	{
 		const long f = arr[i];
-		if (f >= 0 && f < sizeof(BitmapType) * CHAR_BIT)
+		if (f >= 0 && (unsigned long)f < sizeof(BitmapType) * CHAR_BIT)
 		{
 			SetBit(res, (unsigned int)f);
 		}
@@ -215,7 +215,7 @@ const uint32_t NvicPriorityPins = 3;			// priority for GPIO pin interrupts - fil
 const uint32_t NvicPriorityStep = 4;			// step interrupt is next highest, it can preempt most other interrupts
 const uint32_t NvicPriorityUSB = 5;				// USB interrupt
 
-#if !defined(DUET_NG) && !defined(__RADDS__)
+#if HAS_LWIP_NETWORKING
 const uint32_t NvicPriorityNetworkTick = 5;		// priority for network tick interrupt
 const uint32_t NvicPriorityEthernet = 5;		// priority for Ethernet interface
 #endif

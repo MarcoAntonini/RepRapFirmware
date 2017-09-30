@@ -136,7 +136,7 @@ bool GCodeQueue::QueueCode(GCodeBuffer &gb, uint32_t segmentsLeft)
 		{
 			if (reprap.Debug(moduleGcodes))
 			{
-				reprap.GetPlatform().Message(DEBUG_MESSAGE, "(swap) ");
+				reprap.GetPlatform().Message(DebugMessage, "(swap) ");
 			}
 			if (!gb.Put(codeToRun, codeToRunLength))
 			{
@@ -166,6 +166,12 @@ bool GCodeQueue::FillBuffer(GCodeBuffer *gb)
 	code->next = freeItems;
 	freeItems = code;
 	return true;
+}
+
+// Return true if there is nothing to do
+bool GCodeQueue::IsIdle() const
+{
+	return queuedItems == nullptr || queuedItems->executeAtMove > reprap.GetMove().GetCompletedMoves();
 }
 
 // Because some moves may end before the print is actually paused, we need a method to
@@ -205,7 +211,7 @@ void GCodeQueue::Clear()
 {
 	while (queuedItems != nullptr)
 	{
-		QueuedCode *item = queuedItems;
+		QueuedCode * const item = queuedItems;
 		queuedItems = item->Next();
 		item->next = freeItems;
 		freeItems = item;
@@ -217,7 +223,7 @@ void GCodeQueue::Diagnostics(MessageType mtype)
 	reprap.GetPlatform().MessageF(mtype, "Code queue is %s\n", (queuedItems == nullptr) ? "empty." : "not empty:");
 	if (queuedItems != nullptr)
 	{
-		QueuedCode *item = queuedItems;
+		const QueuedCode *item = queuedItems;
 		size_t queueLength = 0;
 		do
 		{
@@ -244,3 +250,6 @@ void QueuedCode::AssignTo(GCodeBuffer *gb)
 		gb->Put('\n');
 	}
 }
+
+// End
+

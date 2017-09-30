@@ -88,11 +88,12 @@ public:
 		IoBits_t ioBits;												// I/O bits to set/clear at the start of this move
 #endif
 		uint8_t moveType;												// the S parameter from the G0 or G1 command, 0 for a normal move
-		bool isFirmwareRetraction;										// true if this is a firmware retraction/un-retraction move
-		bool usePressureAdvance;										// true if we want to us extruder pressure advance, if there is any extrusion
-		bool canPauseBefore;											// true if we can pause before this move
-		bool canPauseAfter;												// true if we can pause just after this move and successfully restart
-		bool hasExtrusion;												// true if the move includes extrusion - only valid if the move was set up by SetupMove
+		uint8_t isFirmwareRetraction : 1;								// true if this is a firmware retraction/un-retraction move
+		uint8_t usePressureAdvance : 1;									// true if we want to us extruder pressure advance, if there is any extrusion
+		uint8_t canPauseBefore : 1;										// true if we can pause before this move
+		uint8_t canPauseAfter : 1;										// true if we can pause just after this move and successfully restart
+		uint8_t hasExtrusion : 1;										// true if the move includes extrusion - only valid if the move was set up by SetupMove
+		uint8_t isCoordinated : 1;										// true if this is a coordinates move
 	};
   
 	GCodes(Platform& p);
@@ -102,9 +103,8 @@ public:
 	void Reset();														// Reset some parameter to defaults
 	bool ReadMove(RawMove& m);											// Called by the Move class to get a movement set by the last G Code
 	void ClearMove();
-	void QueueFileToPrint(const char* fileName);						// Open a file of G Codes to run
+	bool QueueFileToPrint(const char* fileName, StringRef& reply);		// Open a file of G Codes to run
 	void StartPrinting();												// Start printing the file already selected
-	void DeleteFile(const char* fileName);								// Does what it says
 	void GetCurrentCoordinates(StringRef& s) const;						// Write where we are into a string
 	bool DoingFileMacro() const;										// Or still busy processing a macro file?
 	float FractionOfFilePrinted() const;								// Get fraction of file printed
@@ -270,10 +270,9 @@ private:
 	void AppendAxes(StringRef& reply, AxesBitmap axes) const;			// Append a list of axes to a string
 
 	void EndSimulation(GCodeBuffer *gb);								// Restore positions etc. when exiting simulation mode
+	bool IsCodeQueueIdle() const;										// Return true if the code queue is idle
 
-#ifdef DUET_NG
 	void SaveResumeInfo();
-#endif
 
 	Platform& platform;													// The RepRap machine
 
@@ -306,7 +305,6 @@ private:
 	bool pausePending;							// true if we have been asked to pause but we are running a macro
 #ifdef DUET_NG
 	bool isAutoPaused;							// true if the print was paused automatically
-	bool resumeInfoSaved;						// true if we have saved resume info at this pause point
 #endif
 	bool runningConfigFile;						// We are running config.g during the startup process
 	bool doingToolChange;						// We are running tool change macros
@@ -409,7 +407,7 @@ private:
 	size_t lastFilamentErrorExtruder;
 
 	// Misc
-	float longWait;								// Timer for things that happen occasionally (seconds)
+	uint32_t longWait;							// Timer for things that happen occasionally (seconds)
 	uint32_t lastWarningMillis;					// When we last sent a warning message for things that can happen very often
 	AxesBitmap axesToSenseLength;				// The axes on which we are performing axis length sensing
 	int8_t lastAuxStatusReportType;				// The type of the last status report requested by PanelDue
@@ -438,8 +436,9 @@ private:
 #ifdef DUET_NG
 	static constexpr const char* POWER_FAIL_G = "powerfail.g";
 	static constexpr const char* POWER_RESTORE_G = "powerrestore.g";
-	static constexpr const char* RESUME_AFTER_POWER_FAIL_G = "resurrect.g";
 #endif
+
+	static constexpr const char* RESUME_AFTER_POWER_FAIL_G = "resurrect.g";
 
 	static constexpr const float MinServoPulseWidth = 544.0, MaxServoPulseWidth = 2400.0;
 	static const uint16_t ServoRefreshFrequency = 50;
